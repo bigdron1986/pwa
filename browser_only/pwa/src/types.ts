@@ -52,7 +52,7 @@ export interface Recipe {
   steps: string[]
 }
 
-/** Товар с актуальной ценой конкретного магазина */
+/** Товар с актуальной ценой конкретного магазина (алиас: Product) */
 export interface PriceItem {
   name: string
   price: number
@@ -95,3 +95,6 @@ export interface GeneratedMenu {
   total: number
   generatedAt: string
 }
+
+/** Алиасы для удобства (Product = товар с ценой из прайса магазина) */
+export type Product = PriceItem
