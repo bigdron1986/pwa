@@ -1,0 +1,11 @@
+# Зависимости Yandex Cloud Function (обработчик main.handler)
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+
+# Для локального тестирования через FastAPI (в облачной функции не обязательны):
+fastapi>=0.110.0
+uvicorn>=0.29.0
+
+# Опционально: парсинг с рендерингом JavaScript (сайты за антиботом).
+# В Yandex Cloud Functions Playwright работать не будет — используйте Serverless Containers.
+# playwright>=1.44.0

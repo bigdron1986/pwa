@@ -1,0 +1,42 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Базовые настройки под мобильный экран */
+html {
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior-y: none;
+}
+
+body {
+  @apply bg-slate-100 text-slate-900 antialiased dark:bg-slate-950 dark:text-slate-100;
+  /* Учёт "челки"/статус-бара на Android */
+  padding-top: env(safe-area-inset-top);
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+@layer components {
+  /* Крупные кнопки: min-height 48px (требование доступности) */
+  .btn {
+    @apply inline-flex min-h-[48px] w-full items-center justify-center gap-2 rounded-xl px-4 py-3
+      text-base font-semibold transition active:scale-[0.98] disabled:cursor-not-allowed
+      disabled:opacity-50;
+  }
+  .btn-primary {
+    @apply btn bg-green-600 text-white hover:bg-green-700;
+  }
+  .btn-secondary {
+    @apply btn bg-slate-200 text-slate-800 hover:bg-slate-300 dark:bg-slate-800 dark:text-slate-100 dark:hover:bg-slate-700;
+  }
+  .card {
+    @apply rounded-2xl bg-white p-4 shadow-sm dark:bg-slate-900;
+  }
+  .input {
+    @apply min-h-[48px] w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-base
+      outline-none focus:border-green-500 focus:ring-2 focus:ring-green-500/30
+      dark:border-slate-700 dark:bg-slate-800;
+  }
+  .label {
+    @apply mb-1 block text-sm font-medium text-slate-600 dark:text-slate-400;
+  }
+}
