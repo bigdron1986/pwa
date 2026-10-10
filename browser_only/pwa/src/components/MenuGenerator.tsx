@@ -1,36 +1,49 @@
-// MenuGenerator.tsx — генерация меню на 3 дня (mock GigaChat) + список покупок с актуальными ценами
+// MenuGenerator.tsx — генерация меню на 3 дня (mock GigaChat) + список покупок
+// с ценами конкретных выбранных магазинов (сеть + ID филиала)
 import { useEffect, useState } from 'react'
 import { Sparkles, Loader2, ArrowRight, BookOpen } from 'lucide-react'
 import recipesData from '../data/recipes.json'
 import type {
   Recipe, Settings, StorePrices, ShoppingItem, GeneratedMenu, MenuDay, StoreId
 } from '../types'
-import { STORE_LABELS } from '../types'
 import { loadSettings, loadAllPrices, saveMenu, loadMenu } from '../lib/storage'
 
 const RECIPES = recipesData as Recipe[]
 const DAY_NAMES = ['Понедельник', 'Вторник', 'Среда']
 
-/** Простейший поиск цены продукта по размытому совпадению имени во всех загруженных магазинах */
+/** Ключ хранилища цен: "store:storeId" */
+type PriceKey = string
+
+/** Простейший поиск цены продукта по размытому совпадению имени во всех загруженных филиалах */
 function findPrice(
   name: string,
-  allPrices: Record<string, StorePrices>,
-  preferredStores: StoreId[]
-): { store: StoreId; price: number; category: string; matchedName: string } | null {
+  allPrices: Record<PriceKey, StorePrices>,
+  preferredKeys: PriceKey[]
+): { key: PriceKey; store: StoreId; storeId: string; price: number; category: string; matchedName: string } | null {
   const norm = (s: string) => s.toLowerCase().replace(/[^а-яёa-z0-9]/gi, '')
   const key = norm(name)
-  let best: { store: StoreId; price: number; category: string; matchedName: string; score: number } | null = null
+  let best: {
+    key: PriceKey; store: StoreId; storeId: string; price: number
+    category: string; matchedName: string; score: number
+  } | null = null
 
-  for (const [storeStr, data] of Object.entries(allPrices)) {
-    const store = storeStr as StoreId
+  for (const [pkey, data] of Object.entries(allPrices)) {
     for (const p of data.products) {
       const pn = norm(p.name)
-      // Совпадение: полное вхождение одного слова из названия или начала строки
       const tokens = key.split(' ').filter(Boolean)
       const hit = tokens.some((t) => t.length > 3 && pn.includes(t)) || pn.includes(key)
       if (!hit) continue
-      const preferred = preferredStores.includes(store) ? 0 : 1000
-      const candidate = { store, price: p.price, category: p.category, matchedName: p.name, score: preferred + p.price }
+      // Предпочитаем магазин, который пользователь отметил первым
+      const preferred = preferredKeys[0] === pkey ? 0 : preferredKeys.indexOf(pkey) > 0 ? 100 : 500
+      const candidate = {
+        key: pkey,
+        store: data.store,
+        storeId: data.store_id,
+        price: p.price,
+        category: p.category,
+        matchedName: p.name,
+        score: preferred + p.price
+      }
       if (!best || candidate.score < best.score) best = candidate
     }
   }
@@ -39,11 +52,11 @@ function findPrice(
 
 /**
  * ЗАГЛУШКА генерации меню.
- * Возвращает JSON: меню на 3 дня + список покупок с ценами.
+ * Возвращает JSON: меню на 3 дня + список покупок с ценами конкретных магазинов.
  */
 async function generateMenuMock(
   settings: Settings,
-  allPrices: Record<string, StorePrices>
+  allPrices: Record<PriceKey, StorePrices>
 ): Promise<GeneratedMenu> {
   // ЗДЕСЬ БУДЕТ ВЫЗОВ API GigaChat
   // Пример реального кода:
@@ -54,7 +67,7 @@ async function generateMenuMock(
   //   })
   //   return parseGigaChatResponse(await resp.json())
   //
-  // Пока имитируем задержку модели и собираем меню детерминированно из локальной базы рецептов.
+  // Пока имитируем задержку модели и собираем меню из локальной базы рецептов.
   await new Promise((r) => setTimeout(r, 1500))
 
   const people = settings.adults + settings.children
@@ -80,6 +93,11 @@ async function generateMenuMock(
     dinner: pick(byCat('ужин'), di).name
   }))
 
+  // Активные филиалы пользователя (ключ "store:storeId")
+  const activeKeys: PriceKey[] = (Object.entries(settings.stores) as [StoreId, { enabled: boolean; storeId: string }][])
+    .filter(([, sel]) => sel.enabled && sel.storeId.trim())
+    .map(([store, sel]) => `${store}:${sel.storeId.trim()}`)
+
   // Сбор ингредиентов выбранных рецептов -> позиции списка покупок
   const chosenRecipes = days
     .flatMap((d) => [d.breakfast, d.lunch, d.dinner])
@@ -100,18 +118,22 @@ async function generateMenuMock(
   let total = 0
   for (const [, ing] of merged) {
     // Порция масштабируется на количество человек (база ~2 порции)
-    const scaledQty = Math.round((ing.qty * people) / 2 * 10) / 10
-    const found = findPrice(ing.name, allPrices, settings.stores)
-    const store = found?.store ?? settings.stores[0] ?? 'magnit'
+    const scaledQty = Math.round(((ing.qty * people) / 2) * 10) / 10
+    const found = findPrice(ing.name, allPrices, activeKeys)
+    const fallbackKey = activeKeys[0] ?? 'magnit:'
+    const [fbStore, fbId] = fallbackKey.split(':')
+    const store = (found?.store ?? fbStore) as StoreId
+    const storeId = found?.storeId ?? fbId ?? ''
     const price = found?.price ?? 0
     const subtotal = Math.round(price * scaledQty * 100) / 100
     total += subtotal
     items.push({
-      id: `${store}-${ing.name}`,
+      id: `${store}:${storeId}-${ing.name}`,
       name: found?.matchedName ?? ing.name,
       qty: scaledQty,
       unit: ing.unit,
       store,
+      storeId,
       category: found?.category ?? 'прочее',
       price,
       checked: false
@@ -172,9 +194,7 @@ export default function MenuGenerator({ onGoToCart }: { onGoToCart: () => void }
         </p>
       )}
 
-      {error && (
-        <p className="card text-sm text-red-700 dark:text-red-400">Ошибка: {error}</p>
-      )}
+      {error && <p className="card text-sm text-red-700 dark:text-red-400">Ошибка: {error}</p>}
 
       {menu && (
         <>
@@ -206,9 +226,7 @@ export default function MenuGenerator({ onGoToCart }: { onGoToCart: () => void }
               <b className={menu.total > settings!.budgetMax ? 'text-red-600' : 'text-green-600'}>
                 {menu.total.toFixed(2)} ₽
               </b>{' '}
-              <span className="text-slate-500">
-                (бюджет {settings!.budgetMin}–{settings!.budgetMax} ₽)
-              </span>
+              <span className="text-slate-500">(бюджет {settings!.budgetMin}–{settings!.budgetMax} ₽)</span>
             </p>
             <ul className="divide-y divide-slate-200 text-sm dark:divide-slate-800">
               {menu.items.slice(0, 8).map((it) => (
@@ -240,6 +258,3 @@ export default function MenuGenerator({ onGoToCart }: { onGoToCart: () => void }
     </div>
   )
 }
-
-// Переиспользуемая подпись магазина для других компонентов
-export const storeLabel = (id: StoreId) => STORE_LABELS[id]

@@ -1,4 +1,4 @@
-// Общие типы приложения
+// Общие типы приложения (версия с конкретными магазинами по ID)
 
 export type StoreId = 'magnit' | 'monetka' | 'pyaterochka' | 'megapolis'
 
@@ -9,6 +9,20 @@ export const STORE_LABELS: Record<StoreId, string> = {
   megapolis: 'Мегаполис'
 }
 
+/** Как найти ID своего магазина в каждой сети (подсказка в UI) */
+export const STORE_ID_HINTS: Record<StoreId, string> = {
+  magnit: "magnit.ru/delivery → выберите магазин → ID в URL: .../delivery/?shopId=XXXX",
+  pyaterochka: "5ka.ru → переключатель магазина → число после /city/ или в адресе страницы",
+  monetka: "ekamonetka.ru → выбор точки на карте → числовой ID в URL страницы магазина",
+  megapolis: "mega-polis.ru → «Адреса» → номер магазина из названия страницы/URL"
+}
+
+/** Выбор одной сети: включена ли + ID конкретного магазина */
+export interface StoreSelection {
+  enabled: boolean
+  storeId: string // ID конкретного магазина на сайте сети, напр. "1234"
+}
+
 /** Настройки пользователя */
 export interface Settings {
   budgetMin: number // минимальный бюджет на неделю, ₽
@@ -16,11 +30,12 @@ export interface Settings {
   adults: number
   children: number
   allergies: string // аллергии и нелюбимые продукты (текст)
-  stores: StoreId[] // выбранные магазины
+  address: string // мой адрес (для будущего поиска магазинов рядом)
+  stores: Record<StoreId, StoreSelection> // чекбокс + ID для каждой сети
   cloudFunctionUrl: string // URL Yandex Cloud Function с ценами
 }
 
-/**Ingredient рецепта */
+/** Ингредиент рецепта */
 export interface RecipeIngredient {
   name: string
   qty: number
@@ -37,18 +52,21 @@ export interface Recipe {
   steps: string[]
 }
 
-/** Актуальная цена продукта из облачной функции */
+/** Товар с актуальной ценой конкретного магазина */
 export interface PriceItem {
   name: string
   price: number
   category: string
 }
 
-/** Ответ Yandex Cloud Function /api/prices */
+/** Ответ облачной функции по одному магазину */
 export interface StorePrices {
   store: StoreId
+  store_id: string // ID конкретного магазина (филиала)
   updated_at: string
   products: PriceItem[]
+  source?: string // api | html | fallback
+  error?: string // если парсинг этого магазина не удался
 }
 
 /** Позиция списка покупок */
@@ -58,14 +76,14 @@ export interface ShoppingItem {
   qty: number
   unit: string
   store: StoreId
+  storeId: string // ID филиала, к которому идём за покупкой
   category: string
   price: number // цена за единицу, ₽
   checked: boolean
 }
 
-/** Сгенерированное меню */
 export interface MenuDay {
-  day: string // Понедельник и т.д.
+  day: string
   breakfast: string
   lunch: string
   dinner: string

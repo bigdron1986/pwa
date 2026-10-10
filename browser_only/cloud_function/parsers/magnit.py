@@ -1,12 +1,10 @@
-"""Парсер цен Магнита (https://magnit.ru/delivery/).
+"""Парсер цен «Магнита» (https://magnit.ru/delivery/) для КОНКРЕТНОГО магазина.
 
-Стратегия:
-1. Основная — запрос к внутреннему JSON-API каталога доставки
-   (обычно <api-host>/public/api/v2/catalog/products). Если изменится — см. шаг 2.
-2. Запасная — HTML мобильной страницы (requests + BeautifulSoup):
-   вытаскиваем карточки товаров из DOM через BeautifulSoup.
-3. Если оба способа не сработали — отдаём демо-набор, чтобы PWA оставалась рабочей,
-   но в ответе ставим "source": "fallback".
+parse_magnit(store_id): store_id — ID филиала, который пользователь скопировал
+с сайта сети (например, из URL страницы доставки: .../delivery/?shopId=1234).
+
+Стратегия: JSON-API каталога -> HTML мобильной страницы (BeautifulSoup)
+-> fallback-демо (если сайт за антиботом; в ответе будет "source": "fallback").
 """
 from typing import Dict, List
 
@@ -16,14 +14,13 @@ from bs4 import BeautifulSoup
 from . import DEFAULT_HEADERS, logger, dedupe, make_product
 
 STORE_ID = "magnit"
-CATALOG_URLS = [
-    # публичные JSON-эндпоинты каталога доставки (могут меняться)
-    "https://magnit.ru/public/api/v2/catalog/products?limit=50",
-    "https://magnet-app.ru/api/v1/catalog/products?limit=50",
+# Внутренние эндпоинты каталога доставки (могут меняться при редизайне)
+API_URLS = [
+    "https://magnit.ru/public/api/v2/catalog/products?shopId={store_id}&limit=50",
+    "https://magnit.ru/api/checkout/v2/products?storeId={store_id}&limit=50",
 ]
-MOBILE_PAGE = "https://magnit.ru/delivery/"
+MOBILE_PAGE = "https://magnit.ru/delivery/?shopId={store_id}"
 
-# Демо-цены, если парсинг недоступен (сайт за антиботом / нет сети)
 FALLBACK_PRODUCTS: List[Dict] = [
     {"name": "Молоко 3.2% 1л", "price": 89.90, "category": "молочка"},
     {"name": "Хлеб белый 700г", "price": 45.00, "category": "хлеб"},
@@ -35,77 +32,69 @@ FALLBACK_PRODUCTS: List[Dict] = [
 ]
 
 
-def _parse_json_api() -> List[Dict]:
-    """Пробуем получить товары из внутреннего JSON-API."""
-    for url in CATALOG_URLS:
+def _parse_json_api(store_id: str) -> List[Dict]:
+    for url_tpl in API_URLS:
         try:
-            resp = requests.get(url, headers=DEFAULT_HEADERS, timeout=15)
+            resp = requests.get(url_tpl.format(store_id=store_id),
+                                headers=DEFAULT_HEADERS, timeout=15)
             if resp.status_code != 200:
-                logger.warning("magnit: %s вернул %s", url, resp.status_code)
+                logger.warning("magnit[%s]: %s вернул %s", store_id, url_tpl, resp.status_code)
                 continue
             data = resp.json()
             items = data.get("products") or data.get("items") or data.get("data") or []
             products = []
             for it in items:
                 name = it.get("name") or it.get("title") or ""
-                price = (
-                    it.get("price") or it.get("retailPrice")
-                    or (it.get("prices") or {}).get("basic")
-                )
-                cat = (
-                    it.get("category") or it.get("categoryName")
-                    or (it.get("category") or {}).get("name") or "прочее"
-                )
+                price = (it.get("price") or it.get("retailPrice")
+                         or (it.get("prices") or {}).get("basic"))
+                cat = it.get("category") or it.get("categoryName") or "прочее"
                 if isinstance(cat, dict):
                     cat = cat.get("name", "прочее")
                 products.append(make_product(name, price, cat))
             products = dedupe(products)
             if products:
-                logger.info("magnit: получено %d товаров из JSON-API", len(products))
+                logger.info("magnit[%s]: %d товаров из JSON-API", store_id, len(products))
                 return products
         except Exception as e:  # noqa: BLE001
-            logger.warning("magnit: JSON-API %s не сработал: %s", url, e)
+            logger.warning("magnit[%s]: JSON-API не сработал: %s", store_id, e)
     return []
 
 
-def _parse_html() -> List[Dict]:
-    """Запасной вариант: HTML мобильной страницы + BeautifulSoup."""
+def _parse_html(store_id: str) -> List[Dict]:
     try:
-        resp = requests.get(MOBILE_PAGE, headers=DEFAULT_HEADERS, timeout=15)
+        resp = requests.get(MOBILE_PAGE.format(store_id=store_id),
+                            headers=DEFAULT_HEADERS, timeout=15)
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "html.parser")
         products = []
-        # Типичные селекторы карточек; при редизайне — обновить
         for card in soup.select(
             "[class*='product-card'], [class*='ProductCard'], article"
         )[:60]:
-            name_el = card.select_one(
-                "[class*='title'], [class*='name'], h3, h4"
-            )
+            name_el = card.select_one("[class*='title'], [class*='name'], h3, h4")
             price_el = card.select_one("[class*='price']")
             cat_el = card.select_one("[class*='category'], [data-category]")
             if not name_el or not price_el:
                 continue
-            cat = cat_el.get("data-category") if cat_el and cat_el.has_attr("data-category") else "прочее"
+            cat = (cat_el.get("data-category")
+                   if cat_el and cat_el.has_attr("data-category") else "прочее")
             products.append(make_product(name_el.get_text(), price_el.get_text(), cat))
         products = dedupe(products)
         if products:
-            logger.info("magnit: получено %d товаров из HTML", len(products))
+            logger.info("magnit[%s]: %d товаров из HTML", store_id, len(products))
         return products
     except Exception as e:  # noqa: BLE001
-        logger.error("magnit: HTML-парсинг не сработал: %s", e)
+        logger.error("magnit[%s]: HTML-парсинг не сработал: %s", store_id, e)
         return []
 
 
-
-def get_products() -> Dict:
-    """Возвращает {'products': [...], 'source': 'api|html|fallback'}."""
-    products = _parse_json_api()
+def parse_magnit(store_id: str) -> Dict:
+    """Цены конкретного магазина «Магнит». {'products': [...], 'source': api|html|fallback}."""
+    products = _parse_json_api(store_id)
     source = "api"
     if not products:
-        products = _parse_html()
+        products = _parse_html(store_id)
         source = "html"
     if not products:
-        logger.warning("magnit: отдаём fallback-цены")
+        logger.warning("magnit[%s]: отдаём fallback-цены", store_id)
         products, source = FALLBACK_PRODUCTS, "fallback"
     return {"products": products, "source": source}

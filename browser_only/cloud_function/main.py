@@ -1,47 +1,42 @@
-"""main.py — агрегатор цен продуктовых магазинов.
+"""main.py — облачная функция цен конкретных магазинов (Yandex Cloud).
 
-Запускается в трёх режимах:
-
-1. GOOGLE COLAB (тестирование без установки ПО):
-   просто вставьте этот файл + parsers/ в блокнот и запустите ячейку —
-   код ниже сам вызовет парсеры и напечатает JSON с ценами.
-
-2. YANDEX CLOUD FUNCTIONS (прод):
-   точка входа — функция `handler(event, context)` внизу этого файла.
-   При создании функции укажите «HTTP-обработчик» = main.handler.
-   Запросы вида GET /api/prices?store=magnit будут приходить в event[['httpRequest']['query']][0]['value'].
-
-3. REPLIT / локально через FastAPI (необязательно):
-   см. закомментированный блок в конце файла.
+Формат запроса из PWA:
+  GET /api/prices?stores=magnit:1234,pyaterochka:9876,monetka:5678
+где после двоеточия — ID филиала, который пользователь взял с сайта сети.
 
 Формат ответа:
 {
-  "store": "magnit",
-  "updated_at": "2024-01-15T10:30:00",
-  "products": [{"name": "Молоко 1л", "price": 89.90, "category": "молочка"}]
+  "updated_at": "2026-10-10T08:00:00",
+  "stores": [
+    {"store": "magnit", "store_id": "1234", "updated_at": "...",
+     "products": [{"name": "Молоко 1л", "price": 89.9, "category": "молочка"}],
+     "source": "api|html|fallback"},
+    ...
+  ]
 }
+
+Режимы запуска:
+1. GOOGLE COLAB: загрузите main.py и папку parsers/, выполните ячейку —
+   код сам вызовет парсеры и напечатает JSON (см. __main__ ниже).
+2. YANDEX CLOUD FUNCTIONS: точка входа main.handler(event, context).
+3. REPLIT (опционально): FastAPI — раскомментируйте блок в конце файла.
 """
 import json
 import logging
 from datetime import datetime, timezone
 
-# Импорты парсеров. В Colab файлы можно положить в папку parsers/
-# или (вариант "один блокнот") скопировать тела модулей прямо в ячейки выше.
-try:
-    from parsers import magnit, pyaterochka
-except ImportError:  # если папки parsers нет — ругаемся понятным текстом
-    raise SystemExit(
-        "Не найдены модули parsers/magnit.py и parsers/pyaterochka.py. "
-        "Загрузите файлы в блокнот (файлы слева -> загрузка) или вставьте их код отдельной ячейкой."
-    )
+from parsers import magnit, pyaterochka, monetka, megapolis
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("prices")
 
+# Реестр: id сети -> (функция-парсер, параметр для поиска ID)
 PARSERS = {
-    "magnit": magnit.get_products,
-    "pyaterochka": pyaterochka.get_products,
+    "magnit": magnit.parse_magnit,
+    "pyaterochka": pyaterochka.parse_pyaterochka,
+    "monetka": monetka.parse_monetka,
+    "megapolis": megapolis.parse_megapolis,
 }
 
 
@@ -49,99 +44,104 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds")
 
 
-def build_response(store: str) -> dict:
-    """Собирает JSON-ответ для магазина. Никогда не бросает исключение наружу."""
+def parse_stores_param(raw: str):
+    """'magnit:1234,pyaterochka:9876' -> [('magnit','1234'), ('pyaterochka','9876')].
+    Допускается и старый формат без ID: 'magnit' -> store_id=''."""
+    pairs = []
+    for part in (raw or "").split(","):
+        part = part.strip().lower()
+        if not part:
+            continue
+        if ":" in part:
+            store, _, sid = part.partition(":")
+            pairs.append((store.strip(), sid.strip()))
+        else:
+            pairs.append((part, ""))
+    return pairs
+
+
+def build_store_response(store: str, store_id: str) -> dict:
+    """Собирает блок цен одного конкретного магазина. Не бросает исключений наружу."""
     parser = PARSERS.get(store)
     if parser is None:
-        logger.warning("Неизвестный магазин: %s", store)
-        return {"error": f"Неизвестный магазин '{store}'", "allowed": sorted(PARSERS)}
+        logger.warning("Неизвестная сеть: %s", store)
+        return {"store": store, "store_id": store_id, "updated_at": now_iso(),
+                "products": [], "error": f"Неизвестная сеть '{store}'"}
     try:
-        logger.info("Парсинг магазина: %s", store)
-        result = parser()
+        logger.info("Парсинг: %s (ID магазина: %s)", store, store_id or "—")
+        result = parser(store_id)
         payload = {
             "store": store,
+            "store_id": store_id,
             "updated_at": now_iso(),
             "products": result["products"],
             "source": result.get("source", "unknown"),
         }
-        logger.info("%s: %d товаров (source=%s)",
-                    store, len(payload["products"]), payload["source"])
+        logger.info("%s[%s]: %d товаров (source=%s)",
+                    store, store_id, len(payload["products"]), payload["source"])
         return payload
-    except Exception as e:  # noqa: BLE001 — облачная функция не должна падать в 500
-        logger.exception("%s: критическая ошибка парсинга", store)
-        return {
-            "store": store,
-            "updated_at": now_iso(),
-            "products": [],
-            "error": f"{type(e).__name__}: {e}",
-        }
+    except Exception as e:  # noqa: BLE001 — функция не должна падать в 500
+        logger.exception("%s[%s]: критическая ошибка парсинга", store, store_id)
+        return {"store": store, "store_id": store_id, "updated_at": now_iso(),
+                "products": [], "error": f"{type(e).__name__}: {e}"}
+
+
+def build_all(stores_raw: str) -> dict:
+    """Главная бизнес-логика: разбор параметра stores и сборка ответов."""
+    pairs = parse_stores_param(stores_raw)
+    if not pairs:
+        return {"error": "Укажите параметр ?stores=magnit:1234,pyaterochka:9876",
+                "allowed": sorted(PARSERS)}
+    blocks = [build_store_response(s, sid) for s, sid in pairs]
+    return {"updated_at": now_iso(), "stores": blocks}
 
 
 # ---------------------------------------------------------------------------
-# РЕЖИМ 1: запуск в Google Colab / обычном Python — просто выполнить файл
+# РЕЖИМ 1: запуск в Google Colab / обычном Python
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    for shop in ("magnit", "pyaterochka"):
-        print(json.dumps(build_response(shop), ensure_ascii=False, indent=2))
-        print("-" * 60)
+    # Меняйте ID на свои реальные магазины!
+    demo = "magnit:1234,pyaterochka:9876,monetka:5678,megapolis:42"
+    print(json.dumps(build_all(demo), ensure_ascii=False, indent=2))
 
 
 # ---------------------------------------------------------------------------
-# РЕЖИМ 2: YANDEX CLOUD FUNCTIONS — HTTP-функция (точка входа main.handler)
+# РЕЖИМ 2: YANDEX CLOUD FUNCTIONS — HTTP-функция (entrypoint main.handler)
 # ---------------------------------------------------------------------------
 def handler(event, context):
-    """Обработчик HTTP-запроса Yandex Cloud Functions.
+    """Обработчик HTTP-запроса. Параметр stores принимает вид 'magnit:1234,...'.
 
-    Как выглядит вызов из браузера:
-      https://functions.yandexcloud.net/<id-функции>?store=magnit
-      https://functions.yandexcloud.net/<id-функции>/api/prices?store=pyaterochka
-
-    event — словарь с полями httpRequest / httpContext (в зависимости от
-    типа созданной функции обрабатываем оба варианта).
+    Query может приходить в разных форматах — поддерживаем все:
+      queryStringParameters: {'stores': [{'value': '...'}]} или {'stores': '...'}
+      query: [{'name': 'stores', 'value': '...'}]
     """
     req = event.get("httpRequest", event) if isinstance(event, dict) else {}
-    # query: {'store': [{'value': 'magnit'}]} (Yandex формат) либо обычный dict
     raw_query = req.get("queryStringParameters") or req.get("query") or {}
-    store = ""
-    path = (req.get("path") or "").strip("/")
+    stores_raw = ""
 
     def _extract(v):
-        """Достаёт значение из форматов Yandex ([{'value':...}]), list и скаляра."""
         if isinstance(v, list) and v:
             first = v[0]
             return str(first.get("value", first)) if isinstance(first, dict) else str(first)
         return str(v)
 
     if isinstance(raw_query, dict):
-        if "store" in raw_query:
-            store = _extract(raw_query["store"])
-    elif isinstance(raw_query, list):  # Yandex: [{'name': 'store', 'value': 'magnit'}]
+        if "stores" in raw_query:
+            stores_raw = _extract(raw_query["stores"])
+        elif "store" in raw_query:  # обратная совместимость со старым форматом
+            stores_raw = _extract(raw_query["store"])
+    elif isinstance(raw_query, list):
         for q in raw_query:
-            if isinstance(q, dict) and q.get("name") == "store":
-                store = str(q.get("value", ""))
-    if not store:
-        # fallback: магазин прямо в пути, например /api/prices/magnit
-        parts = path.split("/")
-        if parts and parts[-1] in PARSERS:
-            store = parts[-1]
-    store = store.lower().strip()
+            if isinstance(q, dict) and q.get("name") in ("stores", "store"):
+                stores_raw = str(q.get("value", ""))
 
-    if not store:
-        return {
-            "statusCode": 400,
-            "headers": {"Content-Type": "application/json; charset=utf-8"},
-            "body": json.dumps(
-                {"error": "Укажите параметр ?store=magnit|pyaterochka",
-                 "allowed": sorted(PARSERS)}, ensure_ascii=False),
-        }
-
-    body = build_response(store)
-    code = 503 if body.get("error") and not body.get("products") else 200
+    body = build_all(stores_raw)
+    ok = bool(body.get("stores")) and not body.get("error")
     return {
-        "statusCode": code,
+        "statusCode": 200 if ok else 400,
         "headers": {
             "Content-Type": "application/json; charset=utf-8",
-            # CORS — чтобы PWA из StackBlitz/браузера могла обращаться к функции
+            # CORS — чтобы PWA из браузера могла обращаться к функции
             "Access-Control-Allow-Origin": "*",
         },
         "isBase64Encoded": False,
@@ -150,15 +150,14 @@ def handler(event, context):
 
 
 # ---------------------------------------------------------------------------
-# РЕЖИМ 3 (опционально, Replit): FastAPI.
-# Раскомментируйте, если хотите поднимать полноценный HTTP-сервер:
+# РЕЖИМ 3 (опционально, Replit): FastAPI. Раскомментируйте для HTTP-сервера:
 #
 # from fastapi import FastAPI, Query
 # app = FastAPI(title="Product prices")
 #
 # @app.get("/api/prices")
-# def api_prices(store: str = Query(..., description="magnit | pyaterochka")):
-#     return build_response(store.lower())
+# def api_prices(stores: str = Query(..., description="magnit:1234,pyaterochka:9876")):
+#     return build_all(stores)
 #
-# Запуск: uvicorn main:app --host 0.0.0.0 --port 8080
+# Запуск в Replit: uvicorn main:app --host 0.0.0.0 --port 8080
 # ---------------------------------------------------------------------------

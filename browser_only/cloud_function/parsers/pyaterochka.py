@@ -1,12 +1,8 @@
-"""Парсер цен Пятёрочки (https://5ka.ru/).
+"""Парсер цен «Пятёрочки» (https://m.5ka.ru/) для КОНКРЕТНОГО магазина.
 
-Стратегия:
-1. Внутренний JSON-API каталога https://api.5ka.ru/v1/... (нужный endpoint
-   подставляется в 5KA_API_URL; часто меняется — проверяйте в DevTools сайта).
-2. Запасной — HTML страницы через BeautifulSoup.
-3. Fallback-демо-цены, если сайт недоступен / сработал антибот.
+parse_pyaterochka(store_id): store_id — числовой ID филиала со страницы выбора
+магазина на сайте сети. Стратегия: JSON-API -> HTML (bs4) -> fallback-демо.
 """
-import os
 from typing import Dict, List
 
 import requests
@@ -15,12 +11,8 @@ from bs4 import BeautifulSoup
 from . import DEFAULT_HEADERS, logger, dedupe, make_product
 
 STORE_ID = "pyaterochka"
-# Эндпоинт можно переопределить переменной окружения при деплое функции
-API_URL = os.environ.get(
-    "5KA_API_URL",
-    "https://api.5ka.ru/v1/cache/products?limit=50",
-)
-MOBILE_PAGE = "https://m.5ka.ru/catalog/"
+API_URL = "https://m.5ka.ru/public/api/v1/catalog/products?storeId={store_id}&limit=50"
+MOBILE_PAGE = "https://m.5ka.ru/catalog/?store={store_id}"
 
 FALLBACK_PRODUCTS: List[Dict] = [
     {"name": "Молоко 2.5% 950мл", "price": 79.90, "category": "молочка"},
@@ -33,67 +25,64 @@ FALLBACK_PRODUCTS: List[Dict] = [
 ]
 
 
-def _parse_json_api() -> List[Dict]:
-    """Пробуем внутренний JSON-API каталога."""
+def _parse_json_api(store_id: str) -> List[Dict]:
     try:
-        resp = requests.get(API_URL, headers=DEFAULT_HEADERS, timeout=15)
+        resp = requests.get(API_URL.format(store_id=store_id),
+                            headers=DEFAULT_HEADERS, timeout=15)
         if resp.status_code != 200:
-            logger.warning("pyaterochka: API вернул %s", resp.status_code)
+            logger.warning("pyaterochka[%s]: API вернул %s", store_id, resp.status_code)
             return []
         data = resp.json()
-        items = data.get("products") or data.get("items") or data.get("results") or []
+        items = data.get("products") or data.get("items") or []
         products = []
         for it in items:
             name = it.get("name") or it.get("title") or ""
-            price = it.get("price") or it.get("minPrice") or (it.get("cost") or {}).get("value")
-            cat = it.get("category_name") or (it.get("category") or {}).get("name") or "прочее"
+            price = it.get("price") or (it.get("prices") or {}).get("basic")
+            cat = it.get("category") or it.get("categoryName") or "прочее"
             if isinstance(cat, dict):
                 cat = cat.get("name", "прочее")
-            # у 5ka цены часто в копейках
-            if isinstance(price, (int, float)) and price > 5000:
-                price = price / 100.0
             products.append(make_product(name, price, cat))
         products = dedupe(products)
         if products:
-            logger.info("pyaterochka: %d товаров из JSON-API", len(products))
+            logger.info("pyaterochka[%s]: %d товаров из JSON-API", store_id, len(products))
         return products
     except Exception as e:  # noqa: BLE001
         logger.warning("pyaterochka: JSON-API не сработал: %s", e)
         return []
 
 
-def _parse_html() -> List[Dict]:
-    """Запасной вариант: мобильная HTML-витрина."""
+def _parse_html(store_id: str) -> List[Dict]:
     try:
-        resp = requests.get(MOBILE_PAGE, headers=DEFAULT_HEADERS, timeout=15)
+        resp = requests.get(MOBILE_PAGE.format(store_id=store_id),
+                            headers=DEFAULT_HEADERS, timeout=15)
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "html.parser")
         products = []
         for card in soup.select(
-            "[class*='product-card'], [class*='ProductCard'], [class*='catalog-item']"
+            "[class*='product-card'], [class*='catalog-product'], article"
         )[:60]:
-            name_el = card.select_one("[class*='name'], [class*='title'], h3")
+            name_el = card.select_one("[class*='name'], [class*='title'], a")
             price_el = card.select_one("[class*='price']")
             if not name_el or not price_el:
                 continue
             products.append(make_product(name_el.get_text(), price_el.get_text(), "прочее"))
         products = dedupe(products)
         if products:
-            logger.info("pyaterochka: %d товаров из HTML", len(products))
+            logger.info("pyaterochka[%s]: %d товаров из HTML", store_id, len(products))
         return products
     except Exception as e:  # noqa: BLE001
         logger.error("pyaterochka: HTML-парсинг не сработал: %s", e)
         return []
 
 
-def get_products() -> Dict:
-    """Возвращает {'products': [...], 'source': 'api|html|fallback'}."""
-    products = _parse_json_api()
+def parse_pyaterochka(store_id: str) -> Dict:
+    """Цены конкретного магазина «Пятёрочка». {'products': [...], 'source': ...}."""
+    products = _parse_json_api(store_id)
     source = "api"
     if not products:
-        products = _parse_html()
+        products = _parse_html(store_id)
         source = "html"
     if not products:
-        logger.warning("pyaterochka: отдаём fallback-цены")
+        logger.warning("pyaterochka[%s]: отдаём fallback-цены", store_id)
         products, source = FALLBACK_PRODUCTS, "fallback"
     return {"products": products, "source": source}

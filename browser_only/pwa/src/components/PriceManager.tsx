@@ -1,9 +1,12 @@
-// PriceManager.tsx — получение актуальных цен из Yandex Cloud Function + хранение в IndexedDB
+// PriceManager.tsx — обновление цен конкретных магазинов (по их ID)
+// через Yandex Cloud Function: GET /api/prices?stores=magnit:1234,pyaterochka:9876
 import { useEffect, useState } from 'react'
 import { RefreshCw, CalendarClock, Store as StoreIcon, AlertTriangle } from 'lucide-react'
 import type { Settings, StoreId, StorePrices, PriceItem } from '../types'
 import { STORE_LABELS } from '../types'
-import { loadSettings, savePrices, loadAllPrices, getLastPricesUpdate } from '../lib/storage'
+import {
+  loadSettings, savePrices, loadAllPrices, getLastPricesUpdate, getActiveStores
+} from '../lib/storage'
 
 /** Демо-цены на случай, если облачная функция не настроена/недоступна */
 const DEMO_PRICES: Record<string, PriceItem[]> = {
@@ -64,61 +67,86 @@ export default function PriceManager() {
     reload()
   }, [])
 
-  /** Обновить цены по всем выбранным магазинам */
+  /**
+   * Обновить цены по всем выбранным магазинам с заполненными ID.
+   * Формат запроса: GET {cfUrl}/api/prices?stores=magnit:1234,pyaterochka:9876
+   * Ответ функции: {"stores": [{"store":"magnit","store_id":"1234",...}, ...]}
+   */
   const refreshPrices = async () => {
     if (!settings) return
     setLoading(true)
     setError(null)
     setNotice(null)
 
-    const base = settings.cloudFunctionUrl.replace(/\/+$/, '') // убираем хвостовой слэш
-    const results: Record<string, StorePrices> = {}
+    const active = await getActiveStores()
+    if (active.length === 0) {
+      setError('Не выбрано ни одного магазина с ID. Укажите сеть и её ID в настройках.')
+      setLoading(false)
+      return
+    }
 
-    for (const store of settings.stores) {
-      try {
-        if (base) {
-          // Реальный запрос к Yandex Cloud Function
-          const resp = await fetch(`${base}/api/prices?store=${store}`, {
-            headers: { Accept: 'application/json' }
-          })
-          if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
-          const data = (await resp.json()) as StorePrices
-          results[store] = data
-          await savePrices(store, data)
-        } else {
-          // Демо-режим: URL функции не задан в настройках
-          results[store] = {
-            store,
-            updated_at: new Date().toISOString(),
-            products: DEMO_PRICES[store] ?? []
+    const base = settings.cloudFunctionUrl.replace(/\/+$/, '') // без хвостового слэша
+    const param = active.map((a) => `${a.store}:${a.storeId}`).join(',')
+    const results: Record<string, StorePrices> = {}
+    let hadError = false
+
+    try {
+      if (base) {
+        // Реальный запрос к Yandex Cloud Function
+        const resp = await fetch(`${base}/api/prices?stores=${encodeURIComponent(param)}`, {
+          headers: { Accept: 'application/json' }
+        })
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+        const data = await resp.json()
+        // Поддержка двух форм ответа: массив stores или один объект
+        const list: StorePrices[] = Array.isArray(data?.stores)
+          ? data.stores
+          : [data as StorePrices]
+
+        for (const item of list) {
+          if (item.error && (!item.products || item.products.length === 0)) {
+            hadError = true
+            setError(
+              `${STORE_LABELS[item.store as StoreId] ?? item.store} ` +
+              `(ID ${item.store_id}): ${item.error}`
+            )
+            continue
           }
-          await savePrices(store, results[store])
+          results[`${item.store}:${item.store_id}`] = item
+          await savePrices(item.store as StoreId, item.store_id, item)
         }
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e)
-        setError(
-          `${STORE_LABELS[store]}: не удалось получить цены (${msg}). ` +
-            'Проверьте URL облачной функции и интернет-соединение.'
-        )
+      } else {
+        // Демо-режим: URL функции не задан — генерируем локальные цены
+        for (const { store, storeId } of active) {
+          results[`${store}:${storeId}`] = {
+            store,
+            store_id: storeId,
+            updated_at: new Date().toISOString(),
+            products: DEMO_PRICES[store] ?? [],
+            source: 'demo'
+          }
+          await savePrices(store, storeId, results[`${store}:${storeId}`])
+        }
       }
+    } catch (e) {
+      hadError = true
+      const msg = e instanceof Error ? e.message : String(e)
+      setError(`Не удалось получить цены (${msg}). Проверьте URL облачной функции и интернет.`)
     }
 
     setAllPrices(results)
     setLastUpdate(await getLastPricesUpdate())
-    if (!error && !Object.keys(results).length === false) {
-      setNotice('Цены обновлены')
-      setTimeout(() => setNotice(null), 2500)
+    if (!hadError) {
+      setNotice(`Цены обновлены для ${Object.keys(results).length} магазин(ов)`)
+      setTimeout(() => setNotice(null), 3000)
     }
     setLoading(false)
   }
 
   const fmtDate = (iso: string) =>
     new Date(iso).toLocaleString('ru-RU', {
-      day: '2-digit',
-      month: '2-digit',
-      year: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit'
+      day: '2-digit', month: '2-digit', year: 'numeric',
+      hour: '2-digit', minute: '2-digit'
     })
 
   return (
@@ -149,11 +177,19 @@ export default function PriceManager() {
           : 'Цены ещё ни разу не обновлялись'}
       </div>
 
-      {Object.entries(allPrices).map(([store, data]) => (
-        <section key={store} className="card">
+      {Object.entries(allPrices).map(([key, data]) => (
+        <section key={key} className="card">
           <h2 className="mb-2 flex items-center gap-2 text-lg font-bold">
             <StoreIcon size={18} className="text-green-600" />
-            {STORE_LABELS[store as StoreId] ?? store}
+            {STORE_LABELS[data.store as StoreId] ?? data.store}
+            <span className="rounded bg-slate-100 px-1.5 text-xs font-normal text-slate-600 dark:bg-slate-800 dark:text-slate-400">
+              ID {data.store_id}
+            </span>
+            {data.source === 'fallback' && (
+              <span className="rounded bg-amber-100 px-1.5 text-xs text-amber-700 dark:bg-amber-900 dark:text-amber-300">
+                демо-цены сайта
+              </span>
+            )}
             <span className="ml-auto text-xs font-normal text-slate-500">
               {fmtDate(data.updated_at)}
             </span>
@@ -165,9 +201,7 @@ export default function PriceManager() {
                   <div className="font-medium">{p.name}</div>
                   <div className="text-xs text-slate-500">{p.category}</div>
                 </div>
-                <div className="font-semibold tabular-nums">
-                  {p.price.toFixed(2)} ₽
-                </div>
+                <div className="font-semibold tabular-nums">{p.price.toFixed(2)} ₽</div>
               </li>
             ))}
           </ul>
@@ -176,8 +210,8 @@ export default function PriceManager() {
 
       {!settings?.cloudFunctionUrl && Object.keys(allPrices).length > 0 && (
         <p className="px-1 text-sm text-slate-500 dark:text-slate-400">
-          Сейчас используются демо-цены. Укажите URL Yandex Cloud Function в настройках,
-          чтобы получать реальные цены с сайтов магазинов.
+          Сейчас используются локальные демо-цены. Укажите URL Yandex Cloud Function
+          в настройках, чтобы получать реальные цены вашего магазина.
         </p>
       )}
     </div>
